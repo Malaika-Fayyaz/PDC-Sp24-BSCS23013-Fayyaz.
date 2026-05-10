@@ -8,7 +8,8 @@ from ..database.db import (
     create_challenge,
     create_challenge_quota,
     reset_quota_if_needed,
-    get_user_challenges
+    get_user_challenges,
+    update_challenge_with_optimistic_locking
 )
 from ..utils import authenticate_and_get_user_details
 from ..database.models import get_db
@@ -23,6 +24,38 @@ class ChallengeRequest(BaseModel):
 
     class Config:
         json_schema_extra = {"example": {"difficulty": "easy"}}
+
+
+class UpdateChallengeRequest(BaseModel):
+    """Request model for updating a challenge with optimistic locking"""
+    version: int  # Current version the client is updating from
+    title: str = None
+    options: list = None
+    correct_answer_id: int = None
+    explanation: str = None
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "version": 1,
+                "title": "Updated Title",
+                "explanation": "Updated explanation"
+            }
+        }
+
+
+def challenge_to_dict(challenge_obj):
+    """Convert Challenge model to dictionary with version included"""
+    return {
+        "id": challenge_obj.id,
+        "difficulty": challenge_obj.difficulty,
+        "title": challenge_obj.title,
+        "options": json.loads(challenge_obj.options),
+        "correct_answer_id": challenge_obj.correct_answer_id,
+        "explanation": challenge_obj.explanation,
+        "timestamp": challenge_obj.date_created.isoformat(),
+        "version": challenge_obj.version
+    }
 
 
 @router.post("/generate-challenge")
@@ -55,15 +88,7 @@ async def generate_challenge(request: ChallengeRequest, request_obj: Request, db
         quota.quota_remaining -= 1
         db.commit()
 
-        return {
-            "id": new_challenge.id,
-            "difficulty": request.difficulty,
-            "title": new_challenge.title,
-            "options": json.loads(new_challenge.options),
-            "correct_answer_id": new_challenge.correct_answer_id,
-            "explanation": new_challenge.explanation,
-            "timestamp": new_challenge.date_created.isoformat()
-        }
+        return challenge_to_dict(new_challenge)
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -75,7 +100,7 @@ async def my_history(request: Request, db: Session = Depends(get_db)):
     user_id = user_details.get("user_id")
 
     challenges = get_user_challenges(db, user_id)
-    return {"challenges": challenges}
+    return {"challenges": [challenge_to_dict(c) for c in challenges]}
 
 
 @router.get("/quota")
@@ -93,3 +118,61 @@ async def get_quota(request: Request, db: Session = Depends(get_db)):
 
     quota = reset_quota_if_needed(db, quota)
     return quota
+
+
+@router.patch("/challenge/{challenge_id}")
+async def update_challenge(
+    challenge_id: int,
+    update_request: UpdateChallengeRequest,
+    request_obj: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Update a challenge using optimistic locking.
+    
+    The client must provide the current version of the resource.
+    If the version doesn't match, a 409 Conflict is returned with the current version.
+    """
+    try:
+        user_details = authenticate_and_get_user_details(request_obj)
+        user_id = user_details.get("user_id")
+        
+        # Prepare update parameters (only include fields that are not None)
+        update_params = {}
+        if update_request.title is not None:
+            update_params["title"] = update_request.title
+        if update_request.options is not None:
+            update_params["options"] = json.dumps(update_request.options)
+        if update_request.correct_answer_id is not None:
+            update_params["correct_answer_id"] = update_request.correct_answer_id
+        if update_request.explanation is not None:
+            update_params["explanation"] = update_request.explanation
+        
+        # Attempt update with optimistic locking
+        challenge, success = update_challenge_with_optimistic_locking(
+            db=db,
+            challenge_id=challenge_id,
+            current_version=update_request.version,
+            **update_params
+        )
+        
+        if challenge is None:
+            raise HTTPException(status_code=404, detail="Challenge not found")
+        
+        if not success:
+            # Version conflict - resource was modified
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "Conflict",
+                    "message": f"Resource was modified. Current version is {challenge.version}, you submitted version {update_request.version}",
+                    "current_version": challenge.version
+                }
+            )
+        
+        return challenge_to_dict(challenge)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))

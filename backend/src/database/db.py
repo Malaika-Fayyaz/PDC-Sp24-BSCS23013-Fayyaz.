@@ -52,3 +52,49 @@ def create_challenge(
 
 def get_user_challenges(db: Session, user_id: str):
     return db.query(models.Challenge).filter(models.Challenge.created_by == user_id).all()
+
+
+def update_challenge_with_optimistic_locking(
+    db: Session,
+    challenge_id: int,
+    current_version: int,
+    title: str = None,
+    options: str = None,
+    correct_answer_id: int = None,
+    explanation: str = None
+):
+    """
+    Update a challenge using optimistic locking.
+    
+    Returns:
+        - (challenge, True) if update successful
+        - (challenge, False) if version conflict (stale update)
+    """
+    challenge = db.query(models.Challenge).filter(
+        models.Challenge.id == challenge_id
+    ).first()
+    
+    if not challenge:
+        return None, None  # Not found
+    
+    # Check if version matches (optimistic lock)
+    if challenge.version != current_version:
+        return challenge, False  # Version mismatch - conflict!
+    
+    # Version matches, proceed with update
+    if title is not None:
+        challenge.title = title
+    if options is not None:
+        challenge.options = options
+    if correct_answer_id is not None:
+        challenge.correct_answer_id = correct_answer_id
+    if explanation is not None:
+        challenge.explanation = explanation
+    
+    # Increment version
+    challenge.version += 1
+    
+    db.commit()
+    db.refresh(challenge)
+    
+    return challenge, True  # Success

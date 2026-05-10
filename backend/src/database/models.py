@@ -18,6 +18,7 @@ class Challenge(Base):
     options = Column(String, nullable=False)
     correct_answer_id = Column(Integer, nullable=False)
     explanation = Column(String, nullable=False)
+    version = Column(Integer, default=1, nullable=False)  # Optimistic locking version
 
 
 class ChallengeQuota(Base):
